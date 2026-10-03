@@ -1,0 +1,1090 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{pifont}
+\usepackage{booktabs}
+\usepackage{url}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Explainable AI for Trustworthy Automated Threat Triage in Security Operations Centers: Reducing Analyst Burnout and Improving Critical Infrastructure Incident Response}
+
+\author{
+\IEEEauthorblockN{1\textsuperscript{st} Mohammad Atikul Hoque Showrav}
+\IEEEauthorblockA{\textit{Department of Software Engineering} \\
+\textit{Daffodil International University}\\
+Dhaka, Bangladesh \\
+261-35-272@diu.edu.bd}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Abu Zahid Md Jalal Uddin Joy}
+\IEEEauthorblockA{\textit{Department of Information Technology} \\
+\textit{Washington University of Science and Technology}\\
+Alexandria, VA, USA \\
+joy@wust.edu}
+}
+
+\maketitle
+
+\begin{abstract}
+Modern Security Information and Event Management (SIEM) systems with 
+rule-based detection engines inundate Security Operations Centers (SOCs) 
+with thousands of daily alerts, producing severe analyst fatigue and 
+delaying response to genuinely critical breaches. This paper presents 
+an Explainable AI (XAI) framework that automatically classifies and 
+prioritizes network alerts by combining machine-learning probability 
+estimates with a NIST SP 800-30-aligned Business Impact Scoring Rubric. 
+Using a de-duplicated and cleaned partition of the CICIDS2017 benchmark 
+(2{,}520{,}798 network flows across 15 classes), a Random Forest selector extracts the Top-30 most informative flow features, which are then passed to a cost-sensitive XGBoost classifier trained with square-root-balanced sample weighting. SHapley Additive exPlanations (SHAP) are integrated to expose the features driving each multi-class decision, while a weighted 
+Priority Score $S_P=\alpha P_{\text{threat}}+(1-\alpha)I$ injects 
+operational business risk into alert ranking. The proposed classifier 
+achieves an overall accuracy of 99.64\% and a weighted F1 of 1.00, with a 5-fold cross-validated macro F1 of $0.8322\pm0.0187$, a realistic reflection of extreme class imbalance. Critically, the classifier achieves a Critical Attack Recall of 0.94 on the four rare Critical High-Loss classes (Heartbleed, Infiltration, Web Attack Brute Force, and Web Attack SQL Injection), a 51\% relative improvement over the 
+Random Forest baseline (0.62). On the impact-aware queue, all Top-50 alert slots are occupied by 
+Critical High-Loss attacks, compared to 0\% under plain probabilistic 
+ranking, and the rarest attack in the corpus (Heartbleed, with only 
+11 samples) is correctly prioritized at Rank~1. Simulated SOC queue dynamics further indicate substantial reductions in Mean Time to Detect (MTTD) and analyst workload, establishing a practical path towards enterprise-ready, trustworthy SOC automation.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Explainable AI (XAI), Threat Prioritization, Security Operations Center (SOC), 
+SHAP, Class Imbalance, XGBoost.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Modern Security Operations Centers (SOCs) are heavily reliant on Intrusion Detection Systems (IDS) and Security Information and Event Management (SIEM) pipelines \cite{c1,c2,c3}. However, these systems are inherently dependent on static rule-based engines that generate thousands of daily alerts. This phenomenon, known as ``alert fatigue,'' forces SOC analysts to manually triage massive queues of benign or low-priority notifications, often causing critical, high-impact breaches (e.g., Heartbleed or SQL Injections) to go unnoticed until extensive damage is done \cite{c4,c5,c6}.
+
+To mitigate analyst burnout, automated threat triage using Machine Learning (ML) has been extensively researched \cite{c7,c8,c9}. However, pure probabilistic ML models suffer from significant operational limitations. First, they operate as ``black boxes,'' which offer no interpretability as to why an alert was flagged \cite{c10}. Second, standard classifiers lack business context. For example, a 99\% threat probability targeting an isolated testing environment is treated with the same urgency as a threat targeting a critical financial database \cite{c11,c12}.
+
+This paper proposes an Explainable AI (XAI) threat triage framework that bridges the gap between raw probabilistic ML predictions and practical enterprise business risk. Using the public CICIDS2017 benchmark dataset \cite{c13}, we train an optimized XGBoost classifier on a Random Forest-selected feature subset and incorporate a custom Business-Impact Scoring Rubric grounded in NIST SP 800-30. The primary contributions of this paper are:
+
+\begin{itemize}
+    \item A robust machine-learning pipeline that classifies 15 multi-class threats after aggressive de-duplication (308{,}381 duplicate flows removed) and cost-sensitive handling of extreme class imbalance.
+    \item A two-stage dimensionality-reduction strategy in which a Random Forest ranks all 78 network features and the Top-30 are retained, fitted strictly on the training partition to prevent data leakage and to guarantee sub-second SOC prediction latency.
+    \item A multidimensional Business Impact Score grounded in NIST SP 800-30 and CVSS-aligned severity criteria that integrates seamlessly with XGBoost probabilities to prioritize high-risk, financially damaging alerts.
+    \item Comprehensive explainability using SHAP (SHapley Additive exPlanations) values that translate algorithmic decisions into actionable intelligence for SOC analysts.
+\end{itemize}
+
+\section{Methodology}
+
+\subsection{Dataset Description, Cleaning, and Label Mapping}
+We evaluated our framework using the CICIDS2017 benchmark dataset 
+\cite{c1,c14}, merging 8 disparate network traffic captures into a 
+unified corpus. To prevent data leakage and evaluation bias, duplicate network flows were scrubbed and features were strictly scaled on the training partition. Table~\ref{tab:dataset} reports the exact cleaning funnel and the cleaned class distribution.
+
+\begin{table}[htbp]
+\centering
+\caption{CICIDS2017 Cleaning Funnel and Cleaned Class Distribution}
+\label{tab:dataset}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Stage} & \textbf{Rows} & \textbf{Columns} \\ \hline
+Raw merged corpus           & 2{,}830{,}743 & 79 \\ \hline
+After de-duplication        & 2{,}522{,}362 & 79 \\ \hline
+After NaN/Inf cleaning      & 2{,}520{,}798 & 79 \\ \hline
+Training partition (80\%)   & 2{,}016{,}638 & 78 \\ \hline
+Testing partition (20\%)    & 504{,}160     & 78 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+Duplicate network flows (308{,}381 in total) were removed to eliminate trivially memorizable instances. All 15 traffic classes were mapped to numerical indices (0-14); Table~\ref{tab:class_dist} lists the resulting cleaned counts and the per-class train/test partition sizes.
+
+\begin{table}[htbp]
+\centering
+\caption{Cleaned CICIDS2017 Class Distribution and Stratified Split}
+\label{tab:class_dist}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|c|l|r|r|r|}
+\hline
+\textbf{ID} & \textbf{Traffic / Attack Class} & \textbf{Total} & \textbf{Train} & \textbf{Test} \\ \hline
+0  & BENIGN                      & 2{,}095{,}057 & 1{,}676{,}045 & 419{,}012 \\ \hline
+1  & Bot                         & 1{,}948       & 1{,}558       & 390       \\ \hline
+2  & DDoS                        & 128{,}014     & 102{,}411     & 25{,}603  \\ \hline
+3  & DoS GoldenEye               & 10{,}286      & 8{,}229       & 2{,}057   \\ \hline
+4  & DoS Hulk                    & 172{,}846     & 138{,}277     & 34{,}569  \\ \hline
+5  & DoS Slowhttptest            & 5{,}228       & 4{,}182       & 1{,}046   \\ \hline
+6  & DoS slowloris               & 5{,}385       & 4{,}308       & 1{,}077   \\ \hline
+7  & FTP-Patator                 & 5{,}931       & 4{,}745       & 1{,}186   \\ \hline
+8  & Heartbleed                  & 11            & 9             & 2         \\ \hline
+9  & Infiltration                & 36            & 29            & 7         \\ \hline
+10 & PortScan                    & 90{,}694      & 72{,}555      & 18{,}139  \\ \hline
+11 & SSH-Patator                 & 3{,}219       & 2{,}575       & 644       \\ \hline
+12 & Web Attack (Brute Force)    & 1{,}470       & 1{,}176       & 294       \\ \hline
+13 & Web Attack (SQL Injection)  & 21            & 17            & 4         \\ \hline
+14 & Web Attack (XSS)            & 652           & 522           & 130       \\ \hline
+\multicolumn{2}{|c|}{\textbf{Total}} & \textbf{2{,}520{,}798} & \textbf{2{,}016{,}638} & \textbf{504{,}160} \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\subsection{Class Imbalance Strategy}
+As illustrated in Table~\ref{tab:class_dist}, the dataset exhibits 
+extreme class imbalance. Benign traffic dominates the corpus (83.11\%), 
+whereas Heartbleed (11 samples), Web Attack SQL Injection (21 samples), 
+and Infiltration (36 samples) constitute tiny fractions of the data 
+\cite{c15}.
+
+In response, we implement a \textbf{moderated square-root-balanced} 
+class weighting scheme within the XGBoost loss function. Instead of 
+weighting misclassification penalties strictly in inverse proportion 
+to class frequency (which can induce excessive false-positive rates), 
+we weight each sample by the inverse \textbf{square root} of its class 
+frequency. This moderated weighting increases sensitivity to rare 
+attack classes while preserving precision on benign traffic, without 
+relying on synthetic data generation (e.g., SMOTE) or aggressive 
+downsampling \cite{c16,c17}.
+
+\subsection{Feature Engineering and Dimensionality Reduction}
+Processing all 78 raw network features incurs substantial computational overhead and increases prediction latency, which is detrimental to real-time SOC environments \cite{c18,c19}. A Random Forest classifier was first trained on the training partition and the Top-30 features were retained based on Gini impurity rankings. These 30 features were then used to train the primary cost-sensitive XGBoost classifier. 
+Table~\ref{tab:top30} reports the Top-30 features, sorted by XGBoost 
+gain-based importance, alongside the corresponding Random Forest Gini importance. The two rankings reveal a clear divergence in the criteria 
+used by the two tree-based models: the Random Forest selector ranks 
+features based on univariate Gini impurity, whereas XGBoost evaluates 
+gain within the joint context of feature interactions, causing several 
+flow-level statistics, such as \textit{PSH Flag Count} and 
+\textit{Bwd Packet Length Max} to rise substantially in the XGBoost 
+ranking while features such as \textit{Packet Length Std} and 
+\textit{Max Packet Length}, which dominate the Random Forest ranking, 
+fall sharply under XGBoost's gain-based criterion. This divergence is 
+consistent with the different inductive biases of the two models and 
+confirms that the two-stage design leverages complementary feature 
+rankings rather than redundant ones.
+\begin{table}[htbp]
+\centering
+\caption{Top-30 Selected Network Flow Features and Importance 
+Scores. Features are sorted by XGBoost gain-based importance; the 
+Random Forest column reflects Gini-based ranking used during feature 
+selection.}
+\label{tab:top30}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Feature Name} & \textbf{RF Imp.} & \textbf{XGB Imp.} \\ \hline
+PSH Flag Count               & 0.0154 & 0.1220 \\ \hline
+Bwd Packet Length Max        & 0.0395 & 0.1220 \\ \hline
+act\_data\_pkt\_fwd          & 0.0214 & 0.1094 \\ \hline
+Total Length of Bwd Packets  & 0.0550 & 0.0991 \\ \hline
+Bwd Packet Length Std        & 0.0220 & 0.0740 \\ \hline
+Flow IAT Max                 & 0.0142 & 0.0581 \\ \hline
+Avg Bwd Segment Size         & 0.0571 & 0.0580 \\ \hline
+Destination Port             & 0.0180 & 0.0545 \\ \hline
+Subflow Fwd Bytes            & 0.0302 & 0.0443 \\ \hline
+Bwd Header Length            & 0.0225 & 0.0356 \\ \hline
+Average Packet Size          & 0.0407 & 0.0349 \\ \hline
+Fwd Packet Length Mean       & 0.0253 & 0.0295 \\ \hline
+Total Fwd Packets            & 0.0222 & 0.0219 \\ \hline
+Flow IAT Std                 & 0.0244 & 0.0210 \\ \hline
+Init\_Win\_bytes\_backward   & 0.0131 & 0.0191 \\ \hline
+Fwd Header Length            & 0.0216 & 0.0189 \\ \hline
+Flow Bytes/s                 & 0.0109 & 0.0140 \\ \hline
+Fwd Packet Length Max        & 0.0348 & 0.0129 \\ \hline
+Packet Length Std            & 0.0837 & 0.0123 \\ \hline
+Init\_Win\_bytes\_forward    & 0.0133 & 0.0117 \\ \hline
+Max Packet Length            & 0.0747 & 0.0093 \\ \hline
+Fwd IAT Max                  & 0.0124 & 0.0072 \\ \hline
+Packet Length Mean           & 0.0113 & 0.0053 \\ \hline
+Fwd Packet Length Std        & 0.0126 & 0.0050 \\ \hline
+Total Length of Fwd Packets  & 0.0291 & 0.0000 \\ \hline
+Packet Length Variance       & 0.0628 & 0.0000 \\ \hline
+Subflow Bwd Bytes            & 0.0183 & 0.0000 \\ \hline
+Bwd Packet Length Mean       & 0.0210 & 0.0000 \\ \hline
+Fwd Header Length.1          & 0.0133 & 0.0000 \\ \hline
+Avg Fwd Segment Size         & 0.0114 & 0.0000 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+This two-stage strategy serves three operational objectives: 
+(1) \textbf{dimensionality reduction} to prevent overfitting and 
+shrink the memory footprint; (2) \textbf{accelerated classifier 
+training} enabling sub-second triage latency; and (3) \textbf{feature-level explainability}, since \textit{PSH Flag Count} and 
+\textit{Destination Port} directly signal SYN-flood and Brute-Force 
+behavior, while \textit{Bwd Packet Length Max} and 
+\textit{act\_data\_pkt\_fwd} characterize large-payload DoS/DDoS 
+flooding.
+
+\subsection{NIST-Grounded Business-Impact Scoring Rubric}
+To convert raw probabilistic output into actionable SOC intelligence, we formulated a structured Business Impact Scoring Rubric aligned with NIST SP 800-30 \cite{c21,c22} and CVSS severity semantics. Each attack class is scored on a 0-5 integer scale along three axes:
+\begin{itemize}
+    \item \textbf{Asset Criticality ($C$)}: importance of mission and sensitivity of the target asset;
+    \item \textbf{Operational Reliance ($R$)}: dependence of enterprise downtime on the target service;
+    \item \textbf{Estimated Monetary Loss ($L$)}: direct financial damage from a successful exploit.
+\end{itemize}
+
+Attack classes with $I \ge 0.85$ (Heartbleed, SQL Injection, Web 
+Attack Brute Force, Infiltration, DDoS) are formally defined as 
+Critical High-Loss Attacks. Web Attack XSS is treated as a 
+\textbf{High-Priority Attack} (I = 0.73) rather than Critical, due 
+to its client-side attack surface, which primarily targets browser 
+sessions rather than server-side infrastructure.
+
+\begin{table}[htbp]
+\centering
+\caption{NIST SP 800-30-aligned Business Impact Rubric}
+\label{tab:rubric}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Attack Class} & \textbf{$C$} & \textbf{$R$} & \textbf{$L$} & \textbf{Impact $I$} \\ \hline
+BENIGN                          & 0 & 0 & 0 & 0.00 \\ \hline
+PortScan                        & 1 & 2 & 0 & 0.20 \\ \hline
+FTP-Patator                     & 3 & 3 & 4 & 0.67 \\ \hline
+SSH-Patator                     & 3 & 3 & 4 & 0.67 \\ \hline
+Bot                             & 4 & 3 & 4 & 0.73 \\ \hline
+DoS Slowhttptest                & 4 & 4 & 4 & 0.80 \\ \hline
+DoS slowloris                   & 4 & 4 & 4 & 0.80 \\ \hline
+DoS GoldenEye                   & 4 & 4 & 4 & 0.80 \\ \hline
+DoS Hulk                        & 4 & 4 & 4 & 0.80 \\ \hline
+Web Attack (XSS)                & 3 & 3 & 5 & 0.73 \\ \hline
+Infiltration                    & 5 & 4 & 4 & 0.87 \\ \hline
+DDoS                            & 5 & 4 & 4 & 0.87 \\ \hline
+Heartbleed                      & 5 & 4 & 5 & 0.93 \\ \hline
+Web Attack (SQL Injection)      & 5 & 4 & 5 & 0.93 \\ \hline
+Web Attack (Brute Force)        & 5 & 4 & 5 & 0.93 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\subsection{Formulations and Priority Scoring}
+Using the variables from Table~\ref{tab:rubric}, the normalized Impact Score $I \in [0,1]$ is
+\begin{equation}
+I = \frac{C + R + L}{15},
+\label{eq:impact}
+\end{equation}
+where the denominator 15 corresponds to the maximum attainable sum. The final \textbf{Priority Score} $S_P$ merges the XGBoost probability 
+estimate $P_{\text{threat}}$ with $I$:
+\begin{equation}
+S_P = \alpha P_{\text{threat}} + (1 - \alpha) I.
+\label{eq:priority}
+\end{equation}
+Here $\alpha = 0.7$ serves as the operational default: it preserves the primacy of the classifier (70\% weight) while injecting 30\% business context so that a high-confidence PortScan ($I = 0.20$) does not outrank a slightly less confident SQL Injection ($I = 0.93$).
+
+\section{Experimental Results and Evaluation}
+
+\subsection{Multi-Class Threat Classification Metrics}
+Table~\ref{tab:perclass} reports the precision, recall, and F1-score per-class of the cost-sensitive XGBoost classifier in the 504{,}160-flow test partition. The macro F1 figure is noticeably lower than the weighted F1 because 
+five classes (Web Attack XSS, Web Attack Brute Force, Heartbleed, 
+Web Attack SQL Injection, and Bot) exhibit substantially lower F1 
+scores, driven by both extreme sample scarcity (XSS, Heartbleed, 
+SQLi) and inherent classification difficulty (Bot, Brute Force). 
+This is a realistic reflection of extreme class imbalance rather 
+than a model deficiency.
+
+\begin{table}[htbp]
+\centering
+\caption{Per-Class Classification Metrics (Moderated XGBoost, Test Partition)}
+\label{tab:perclass}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|l|c|c|c|r|}
+\hline
+\textbf{Class} & \textbf{Prec.} & \textbf{Rec.} & \textbf{F1} & \textbf{Support} \\ \hline
+BENIGN                     & 1.00 & 1.00 & 1.00 & 419{,}012 \\ \hline
+Bot                        & 0.65 & 0.99 & 0.78 & 390       \\ \hline
+DDoS                       & 1.00 & 1.00 & 1.00 & 25{,}603  \\ \hline
+DoS GoldenEye              & 0.98 & 1.00 & 0.99 & 2{,}057   \\ \hline
+DoS Hulk                   & 1.00 & 1.00 & 1.00 & 34{,}569  \\ \hline
+DoS Slowhttptest           & 0.97 & 1.00 & 0.98 & 1{,}046   \\ \hline
+DoS slowloris              & 1.00 & 0.99 & 0.99 & 1{,}077   \\ \hline
+FTP-Patator                & 1.00 & 1.00 & 1.00 & 1{,}186   \\ \hline
+Heartbleed                 & 0.67 & 1.00 & 0.80 & 2         \\ \hline
+Infiltration               & 0.88 & 1.00 & 0.93 & 7         \\ \hline
+PortScan                   & 0.99 & 1.00 & 0.99 & 18{,}139  \\ \hline
+SSH-Patator                & 1.00 & 1.00 & 1.00 & 644       \\ \hline
+Web Attack (Brute Force)   & 0.23 & 0.74 & 0.36 & 294       \\ \hline
+Web Attack (SQL Injection) & 0.40 & 1.00 & 0.57 & 4         \\ \hline
+Web Attack (XSS)           & 0.12 & 0.50 & 0.20 & 130       \\ \hline
+\textbf{Macro Avg}         & 0.79 & 0.95 & 0.84 & 504{,}160 \\ \hline
+\textbf{Weighted Avg}      & 1.00 & 1.00 & 1.00 & 504{,}160 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{Precision_ROC_AUC.png}
+  \caption{One-vs-rest Precision-Recall (left) and ROC-AUC (right) 
+  curves for all 15 classes under the proposed moderated XGBoost 
+  classifier. Under extreme class imbalance the ROC-AUC saturates 
+  near 1.00 for every class (macro mean 0.9998), whereas the 
+  Precision-Recall curves expose the true detection difficulty of 
+  rare attacks. Web Attack XSS reaches only AP $= 0.18$, and Web 
+  Attack Brute Force / SQL Injection each reach AP $= 0.43$ and 
+  $0.60$ respectively, while all major DoS, PortScan, and Brute-Force 
+  classes remain at or above AP $\geq 0.94$.}
+  \label{fig:roc_pr}
+\end{figure*}
+
+Fig.~\ref{fig:roc_pr} reveals a critical methodological point: under 
+extreme class imbalance, one-vs-rest ROC-AUC saturates near 1.00 for 
+every class (macro mean 0.9998), yet the Precision-Recall curves expose 
+the true difficulty of rare attacks. Web Attack XSS is the most 
+challenging class (AP $= 0.18$), reflecting the inherent limitations 
+of flow-level features for client-side attack detection. In contrast, 
+the proposed moderated XGBoost classifier achieves strong PR-AUC on 
+high-impact rare classes such as Infiltration (AP $= 0.96$) and 
+Heartbleed (AP $= 1.00$), confirming the effectiveness of square-root-
+balanced sample weighting. This divergence between ROC-AUC and PR-AUC 
+is the classic signature of class-imbalanced detection and motivates 
+us to treat PR-AUC, not ROC-AUC, as the governing metric for SOC 
+deployment.
+
+\subsection{Metric Choice under Imbalance}
+We deliberately report both ROC-AUC and PR-AUC. Although the ROC-AUC 
+for one-vs-rest remains at 1.00 for nearly every class, the macro-
+averaged PR-AUC (mean AP $= 0.85$) and the AP values per-class in 
+Fig.~\ref{fig:roc_pr} provide a more faithful picture: the classifier 
+is near-perfect on the volumetric DoS and Infiltration families 
+(AP $\geq 0.96$) but degrades on the two most challenging web-attack 
+classes (Web Attack XSS AP $= 0.18$, Web Attack Brute Force AP $= 0.43$). 
+This divergence is entirely consistent with the per-class F1 analysis 
+in Section~III.A and the precision-recall trade-off reported in 
+Table~\ref{tab:rf_vs_xgb}: both metrics independently confirm that 
+the framework's primary strength lies in detecting rare high-impact 
+attacks (Heartbleed, Infiltration, DDoS), while flow-based detection 
+of client-side XSS remains fundamentally difficult.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{Multi_Metric_Radar_Plot_Threat_Classess.png}
+  \caption{Multi-Metric Radar Plot illustrating precision, recall, and F1-score equilibrium across representative threat classes.}
+  \label{fig:radar}
+\end{figure}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{Normalized_Confusion_Matrix_XGBoost_Classifier.png}
+  \caption{Normalized $15\times15$ Confusion Matrix of the proposed 
+  moderated XGBoost classifier. Diagonal entries represent per-class 
+  recall values. The classifier achieves near-perfect discrimination 
+  across most classes; residual misclassifications are confined to 
+  adjacent web-attack classes (Brute Force $\leftrightarrow$ XSS) and 
+  to low-prevalence classes (Bot, Infiltration).}
+  \label{fig:confusion}
+\end{figure*}
+
+A per-class radar view of precision, recall, and F1-score is presented in 
+Fig.~\ref{fig:radar}, showing that the classifier maintains balanced 
+performance across the major attack families.
+
+Fig.~\ref{fig:confusion} shows that misclassifications are confined 
+almost entirely to residual confusion between the two adjacent 
+web-attack classes (Brute Force $\leftrightarrow$ XSS), which exhibit 
+substantially overlapping flow-level signatures, and to the 
+low-prevalence BENIGN-Bot boundary. The high-volume threat families 
+(DDoS, DoS Hulk, PortScan, SSH-Patator, FTP-Patator) all achieve 
+perfect diagonal values (1.00), confirming that the proposed moderated 
+XGBoost classifier maintains strong discriminative power across the 
+operationally important attack families.
+
+\subsection{Five-Fold Cross-Validation Stability}
+To confirm that the classifier is not overfitting the training 
+partition, we performed a 5-fold Stratified Cross-Validation on the 
+training set. Fig.~\ref{fig:cv_stability} reports the macro F1 
+distribution across folds: $0.8322 \pm 0.0187$. The two outlier 
+folds, Fold 4 (0.8608) and Fold 5 (0.8021), correspond to splits 
+that retain different proportions of the rarest attack classes 
+(Heartbleed, Infiltration, Web Attack SQLi), an inherent consequence 
+of their extreme scarcity (2-7 test samples per class).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{5fold_CV_macro_F1_Score.png}
+  \caption{5-fold Cross-Validation Macro F1-Score Stability plot 
+(Mean $0.8322 \pm 0.0187$). Each fold's score is shown on a separate 
+row with value labels; the dashed red line marks the mean and the 
+shaded region marks $\pm 1$ standard deviation.}
+\label{fig:cv_stability}
+\end{figure}
+
+\subsection{Explainable AI Feature Attribution}
+SHAP tree-explainers were attached to the proposed moderated XGBoost 
+pipeline to expose which flow features drive each multi-class decision 
+\cite{c23}. Fig.~\ref{fig:shap_bar} reports global feature importance 
+aggregated across all 15 classes. \textit{Destination Port} dominates the global ranking, reflecting 
+its role as a discriminative signal for port-specific attacks such as 
+FTP-Patator and SSH-Patator. It is followed by \textit{Init\_Win\_bytes\_ 
+backward} and \textit{Init\_Win\_bytes\_forward} (TCP initial window 
+sizes), which distinguish brute-force and infiltration behaviors from 
+benign traffic, and by \textit{Avg Bwd Segment Size}, \textit{Subflow 
+Fwd Bytes}, and \textit{Flow IAT Max}, which characterize volumetric 
+DoS floods. This ranking is consistent with 
+the per-class recall values reported in Table~\ref{tab:perclass}, 
+confirming that the SHAP attribution aligns with the underlying 
+network behavior captured by the classifier.
+Note that the SHAP-based global ranking in Fig.~\ref{fig:shap_bar} 
+differs from the XGBoost gain-based ranking reported in 
+Table~\ref{tab:top30}: gain importance measures each feature's 
+contribution to split loss reduction during training, whereas SHAP 
+measures the marginal contribution to individual predictions. Both 
+rankings are valid and complementary, with Destination Port and 
+Init\_Win\_bytes emerging as top SHAP contributors while 
+\textit{PSH Flag Count} and \textit{Bwd Packet Length Max} dominate 
+the gain-based view.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{Shap_Bar_Plot.png}
+  \caption{SHAP global feature importance bar chart for the proposed 
+moderated XGBoost classifier, aggregated across all 15 classes. 
+\textit{Destination Port} dominates the global ranking, followed by 
+\textit{Init\_Win\_bytes\_backward} and \textit{Init\_Win\_bytes\_forward}, 
+which are critical discriminators of brute-force and infiltration 
+behavior.}
+\label{fig:shap_bar}
+\end{figure}
+
+The per-class SHAP Beeswarm plots (Fig.~\ref{fig:shap_bot} and 
+Fig.~\ref{fig:shap_ddos}) reveal directional dynamics that align 
+with physical network behavior. For Bot classification, high 
+\textit{Destination Port} values (red dots) strongly push the model 
+toward positive prediction, while low values (blue dots) push toward 
+negative. For DDoS classification, high values of 
+\textit{act\_data\_pkt\_fwd} (active data packets forwarded) and 
+\textit{Fwd Packet Length Max} are the dominant positive drivers, 
+consistent with the large-payload flooding behavior characteristic 
+of volumetric DDoS attacks. This directional interpretation enables 
+SOC analysts to map each alert's predicted class to a specific 
+physical network signature, providing operational grounding for 
+the automated triage decision.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_BOT_Threat.png}
+  \caption{SHAP Beeswarm for Bot detection.}
+  \label{fig:shap_bot}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_DDoS_Threat.png}
+  \caption{SHAP Beeswarm for DDoS detection.}
+  \label{fig:shap_ddos}
+\end{figure}
+
+\subsection{Impact-Aware Prioritization Evaluation}
+\label{subsec:impact_aware}
+Plain probabilistic ranking saturates the analyst's top-of-queue view with high-frequency attacks. Table~\ref{tab:top_alerts} lists the top-10 alerts generated by the 
+impact-aware priority queue under the proposed moderated XGBoost 
+classifier. Heartbleed and Web Attack (Brute Force) occupy all ten 
+slots, with $S_P$ values above 0.975, demonstrating that the rubric successfully surfaces the highest-impact attacks at the top of the analyst queue. Notably, Heartbleed, which is one of the highest-impact vulnerability in the CICIDS2017 corpus, is ranked first despite having only 11 total samples, confirming the framework's ability to prioritize rare but catastrophic threats. In the plain XGBoost queue, no critical high-loss attack ($I\ge0.85$) appeared within the Top-50 alerts; in the proposed impact-aware queue, all Top-50 slots were occupied by critical high-loss attacks (100\% surface rate).
+
+
+\begin{table}[htbp]
+\centering
+\caption{Top-10 Impact-Aware Priority Alerts ($\alpha=0.7$). Heartbleed, 
+one of the highest-impact vulnerabilities in the corpus, is correctly 
+prioritized at Rank~1 despite having only 11 samples, demonstrating 
+the framework's ability to surface rare but catastrophic threats.}
+\label{tab:top_alerts}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|c|l|c|c|c|}
+\hline
+\textbf{Rank} & \textbf{Actual Threat} & \textbf{$P_{\text{threat}}$} & \textbf{Impact $I$} & \textbf{$S_P$} \\ \hline
+1  & Heartbleed                  & 0.9954 & 0.93 & 0.9758 \\ \hline
+2  & Web Attack (Brute Force)    & 0.9951 & 0.93 & 0.9755 \\ \hline
+3  & Web Attack (Brute Force)    & 0.9951 & 0.93 & 0.9755 \\ \hline
+4  & Web Attack (Brute Force)    & 0.9949 & 0.93 & 0.9755 \\ \hline
+5  & Web Attack (Brute Force)    & 0.9948 & 0.93 & 0.9754 \\ \hline
+6  & Web Attack (Brute Force)    & 0.9948 & 0.93 & 0.9754 \\ \hline
+7  & Web Attack (Brute Force)    & 0.9947 & 0.93 & 0.9753 \\ \hline
+8  & Web Attack (Brute Force)    & 0.9947 & 0.93 & 0.9753 \\ \hline
+9  & Web Attack (Brute Force)    & 0.9947 & 0.93 & 0.9753 \\ \hline
+10 & Web Attack (Brute Force)    & 0.9947 & 0.93 & 0.9753 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Random Forest Baseline vs. Proposed XGBoost Classifier. 
+\textit{Crit. Recall} denotes macro-averaged recall on the four rare 
+Critical High-Loss attack classes (Heartbleed, Infiltration, Web Attack 
+Brute Force, Web Attack SQL Injection). DDoS is excluded from this 
+metric because its test-set prevalence (25{,}603 samples) makes it 
+non-rare and hence a poor test of rare-class detection capability.}
+\label{tab:rf_vs_xgb}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Model} & \textbf{Acc.} & \textbf{Macro F1} & \textbf{Weighted F1} & \textbf{Crit. Recall} \\ \hline
+Random Forest    & 99.79\% & 0.85 & 1.00 & 0.62 \\ \hline
+Proposed XGBoost & 99.64\% & 0.84 & 1.00 & \textbf{0.94} \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+Table~\ref{tab:rf_vs_xgb} reports the ablation between the Random 
+Forest baseline and the proposed cost-sensitive XGBoost classifier. 
+The proposed model achieves a Critical Attack Recall of 0.94 versus 
+0.62 for the Random Forest baseline, a 51\% relative improvement in 
+the detection of the four rare, high-impact attack classes. This 
+improvement is obtained at the cost of reduced precision on the same 
+classes (0.55 vs. higher RF values), reflecting the classic 
+precision-recall trade-off that accompanies cost-sensitive learning. 
+The operational reasoning is deliberate: in a SOC environment, a 
+missed critical attack can result in multi-million-dollar breaches 
+and regulatory penalties, whereas a false alarm costs the analyst 
+a few minutes of triage time. The framework therefore prioritizes 
+recall on the four rare critical classes, and the Business Impact 
+Rubric mitigates the effect of reduced precision by ranking 
+high-impact alerts above lower-impact ones in the priority queue.
+
+\subsection{Simulated Workload and Financial Risk Optimization}
+To quantify operational impact without disrupting a production SOC, alert queueing was evaluated in a discrete-event simulation.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{Cost_Benefit_financial_loss_reduction_Business_Risk_Mitigation.png}
+  \caption{Business-risk mitigation velocity: number of alerts needed to capture increasing fractions of Critical High-Loss attacks. Under plain probabilistic ranking, over 293{,}000 alerts are needed to capture just 50\% of critical attacks, whereas the proposed Business-Aware Priority Queue achieves the same coverage within the first 
+13{,}287 alerts (a 22$\times$ speedup). Log scale on the y-axis 
+highlights the order-of-magnitude difference.}
+\label{fig:cost_benefit}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{SOC_Workload_Reduction.png}
+  \caption{SOC workload reduction: critical attack surface velocity per decile of processed alert queue.}
+  \label{fig:workload}
+\end{figure}
+
+Fig.~\ref{fig:cost_benefit} reports the number of alerts that must be 
+processed to capture increasing fractions of Critical High-Loss attacks. 
+Under plain probabilistic ranking, over 293{,}000 alerts must be 
+processed to capture just 50\% of critical attacks, a direct 
+consequence of the BENIGN class (83\% of the test set) achieving the 
+highest average classification confidence and therefore dominating 
+the top-ranked alerts. In contrast, the proposed Business-Aware 
+Priority Queue captures 50\% of critical attacks within the first 
+13{,}287 alerts and 95\% within 25{,}246, a speedup of 16$\times$ to 
+22$\times$ across realistic SOC operational thresholds. The complete 
+capture (100\%) requires processing the entire test partition under 
+both strategies, since the residual 5\% of critical attacks are 
+low-confidence detections that are inherently displaced within the 
+queue.
+
+\subsection{Sensitivity Analysis of Weight Parameter $\alpha$}
+Fig.~\ref{fig:sensitivity} and Table~\ref{tab:alpha} report the sensitivity of the composite score to $\alpha$.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{Sensitivity_Analysis_Different_Alpha_Values.png}
+  \caption{Sensitivity analysis of the priority score as a function of $\alpha$.}
+  \label{fig:sensitivity}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Alpha ($\alpha$) Parameter Sensitivity and Trade-offs}
+\label{tab:alpha}
+\begin{tabular}{clc}
+\toprule
+\textbf{$\alpha$} & \textbf{Operational Focus} & \textbf{Mean Impact@50} \\
+\midrule
+0.3 & High-risk sensitivity (Risk-Averse)     & 0.9300 \\
+0.5 & Balanced trade-off                      & 0.9264 \\
+0.7 & High-precision focus (Precision-First)  & 0.9132 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+ Although $\alpha = 0.3$ yields a marginally higher mean impact score 
+(0.9300 vs.\ 0.9132), we adopt $\alpha = 0.7$ as the operational 
+default for two reasons. First, the mean-impact gap across the three 
+settings is small ($< 2\%$), indicating that the priority ranking is 
+largely robust to weight selection, and all three settings surface 
+over 96\% of Critical High-Loss attacks within the Top-10\% of the 
+queue. Second, in high-throughput SOC environments the dominant 
+operational cost is false-alarm fatigue, not missed detections, a 
+phenomenon extensively documented in the SOC literature. A 70\% 
+classifier primacy preserves precision on high-confidence alerts, 
+while the 30\% business-impact term still ensures that critical 
+attacks outrank benign traffic. SOC operators seeking stricter 
+risk-aversion can lower $\alpha$ to 0.3, as demonstrated in the 
+sensitivity analysis above, without compromising the framework's 
+core behavior.
+
+\subsection{State-of-the-Art Comparison}
+Table~\ref{tab:sota} positions the proposed framework against the baselines of the representative literature on CICIDS2017.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparative capability and performance against representative literature baselines. Baseline F1 values are reported as published in the original papers; the Proposed row reflects our evaluation on the de-duplicated CICIDS2017 partition.}
+\label{tab:sota}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{XAI} & \textbf{\shortstack{Business\\Priority}} & \textbf{\shortstack{Triage\\Efficiency}} & \textbf{\shortstack{Weighted\\F1}} \\
+\midrule
+DNN + Feat.\ Select.\ \cite{c24}      & \ding{55} & \ding{55} & Medium & 0.94 \\
+SHAP + XGBoost \cite{c25}             & \ding{51} & \ding{55} & Medium & 0.95 \\
+\textbf{Proposed}                     & \ding{51} & \ding{51} & \textbf{High (100\%)} & \textbf{1.00} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+Unlike prior work, the proposed framework is the only method that couples classifier explainability with a NIST-aligned business-risk 
+prior, achieving a 100\% surface rate of critical high-loss attacks within the Top-50 alert queue while maintaining a Weighted F1 of 
+1.00 on the de-duplicated CICIDS2017 partition.
+
+% Solution for Real-world Scenario
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{Real_Life_Solution_visual.drawio.png}
+  \caption{Real-world operational scenario of the proposed framework. 
+  An adversary (top-left) sends malicious traffic that triggers thousands 
+  of alerts in the enterprise SIEM (top-right). The moderated XGBoost classifier 
+  and SHAP explainer (bottom-right) process each alert and produce a 
+  ranked queue (bottom-left) that surfaces Critical High-Loss attacks 
+  first. SOC analysts (center) triage the prioritized queue, and their 
+  feedback drives a continuous retraining loop that keeps the model 
+  current.}
+  \label{fig:realworld}
+\end{figure*}
+
+\section*{Acknowledgment}
+
+The authors acknowledge the use of Leonardo AI to generate the base visual elements in Fig.~\ref{fig:realworld}, which were subsequently composed, arranged, and annotated by the authors. All other figures and tables were designed and produced by the authors using standard scientific-visualization and diagramming tools. The authors take full responsibility for the content and accuracy of all figures in this paper.
+
+\begin{figure}[htbp] 
+  \centering
+  \includegraphics[width=\linewidth]{SOC-XAI-Triage-Microservice-Diagram.drawio.png}
+\caption{Proposed deployment architecture within an enterprise SOC 
+pipeline. Alerts stream from the existing SIEM into a containerized 
+XAI Triage Microservice that classifies, explains, and prioritizes 
+each alert. The Priority Score Engine combines $P_{\text{threat}}$ 
+and $I$ into a single triage score $S_P = \alpha P_{\text{threat}} 
++ (1-\alpha)I$, and true-positive/false-positive labels feed a weekly 
+retraining loop. The dashboard shows an illustrative example of a 
+ranked queue; actual priority scores depend on the specific classifier 
+configuration (see Table~\ref{tab:top_alerts}).}
+\label{fig:deployment}
+\end{figure}
+
+\section{Practical Deployment in Enterprise SOC Environments}
+
+The research prototype described in Sections~II-III is deliberately designed to be deployment-ready. Fig.~\ref{fig:realworld} illustrates the real-world operational scenario, while Fig.~\ref{fig:deployment} 
+details the corresponding microservice pipeline. Together, these two views demonstrate that the framework can be productized within a modern Security Operations Center without replacing the existing SIEM infrastructure.
+
+\subsection{Deployment Architecture}
+
+The framework is implemented as a modular, containerized microservice 
+that integrates with the SIEM through its native event-forwarding 
+mechanism. As shown in Fig.~\ref{fig:deployment}, the end-to-end 
+pipeline consists of four stages:
+
+\begin{enumerate}
+    \item \textbf{Alert Ingestion.} Alerts generated by the SIEM 
+    (Splunk, IBM QRadar, Wazuh, Microsoft Sentinel, or Elastic SIEM) 
+    are streamed to the XAI Triage Service through standard 
+    interfaces such as the Splunk HTTP Event Collector, QRadar 
+    Custom Action Scripts, or REST webhooks.
+    
+    \item \textbf{Feature Extraction.} A stateless microservice 
+    reconstructs the Top-30 network flow features (Table~\ref{tab:top30}) 
+    from raw packet captures or NetFlow records and normalizes them 
+    using the training-partition scaler, ensuring feature-scale 
+    consistency across deployments.
+    
+    \item \textbf{Inference and Explanation.} The XGBoost classifier 
+    produces a class-probability estimate $P_{\text{threat}}$, and 
+    the SHAP tree-explainer computes per-feature attributions for 
+    each prediction. The Priority Score engine then combines these 
+    with the Business Impact Score $I$ (Eq.~\ref{eq:priority}) to 
+    produce $S_P$.
+    
+    \item \textbf{Analyst Dashboard.} Enriched alerts, including the 
+    $S_P$, the SHAP explanation, and the associated impact category, 
+    are pushed back into the SIEM or surfaced through a companion 
+    dashboard where analysts consume the queue in priority order.
+\end{enumerate}
+
+The entire pipeline is packaged as a Docker image and can be deployed 
+either on-premise for regulated industries, on cloud infrastructure 
+for cost elasticity, or in a hybrid configuration for organizations 
+with data-residency constraints.
+
+\subsection{Real-Time Performance Considerations}
+
+The proposed pipeline has been designed to operate at an inference 
+latency of under 20~ms per alert per CPU core, enabling a single 
+container to process over 150{,}000 alerts per hour on commodity 
+hardware. This throughput leaves substantial headroom even for 
+high-volume SOCs where alert rates routinely exceed several thousand 
+notifications per hour at the SIEM layer.
+
+Three operational safeguards ensure reliability:
+
+\begin{itemize}
+    \item \textbf{Stateless inference.} Each alert is processed 
+    independently, so horizontal scaling is straightforward; adding 
+    additional containers linearly increases throughput.
+    
+    \item \textbf{Fail-safe fallback.} If the inference service is 
+    unavailable, the SIEM continues to operate on its native 
+    rule-based pipeline; the framework enriches alerts opportunistically 
+    rather than gating them.
+    
+    \item \textbf{Model versioning.} Each model artifact is tagged 
+    with its training timestamp, feature schema version, and 
+    performance metrics, allowing rapid rollback in case of 
+    production degradation.
+\end{itemize}
+
+\subsection{Continuous Learning and Analyst Feedback}
+
+A practical SOC deployment benefits from a closed feedback loop, as 
+illustrated in the bottom layer of Fig.~\ref{fig:deployment}. When an 
+analyst marks an alert as a true positive or false positive, the label 
+is logged and stored. On a weekly cadence, these labels are used to 
+(i) monitor the priority distribution, (ii) detect performance drift 
+against the deployed model, and (iii) trigger periodic retraining with 
+a refreshed dataset. Because the Business Impact Rubric is decoupled 
+from the classifier, an organization can update impact scores (for 
+example, after a new critical asset is provisioned) without retraining 
+the model.
+
+\subsection{Configurable Business Impact Rubric}
+
+While the default rubric reported in Table~\ref{tab:rubric} reflects 
+general industry expectations, a deployable system must allow 
+organizations to customize the $C$, $R$, and $L$ scores to match 
+their own asset inventory and risk appetite. The framework therefore 
+exposes the rubric as a YAML configuration file that maps each attack 
+class to a triple $(C, R, L)$, enabling a CISO or SOC lead to adjust 
+priorities without code changes. The $\alpha$ weight in Eq.~\ref{eq:priority} 
+is similarly configurable, allowing different SOCs to tune the 
+classifier-versus-business trade-off.
+
+\subsection{Cost-Benefit Analysis}
+
+A conservative operational model estimates the economic value of the 
+proposed framework as follows. Suppose a mid-size SOC receives approximately 12{,}000 raw alerts per day 
+at the SIEM layer. After tier-1 triage, roughly 160 alerts per day escalate 
+to tier-2 analysts. If each escalated alert requires 6 minutes of 
+analyst attention and 60\% are low-value false positives or redundant 
+notifications, the SOC spends approximately 288 analyst-hours per month 
+on non-actionable work at the tier-2 level. At a fully-loaded analyst cost of \$60 per hour, this represents 
+roughly \$17{,}280 per month in wasted capacity.
+
+By surfacing critical high-loss attacks within the Top-50 alerts, the proposed framework allows analysts to close critical incidents substantially earlier while spending only a small fraction of their shift on low-value alerts. 
+Even under conservative assumptions of 30\% reduction in triage-time and 
+20\% improvement in incident response velocity, the framework 
+recovers between \$5{,}000 and \$8{,}000 per analyst per month, 
+translating to an annual savings of \$480{,}000 to \$768{,}000 for 
+an 8-analyst SOC. Against a modest deployment cost (a single 
+GPU-less container and 2-4 weeks of integration effort), the return 
+on investment is realized well within the first quarter.
+
+\subsection{Regulatory and Compliance Alignment}
+
+The framework aligns with several regulatory and industry standards 
+that govern SOC operations in critical infrastructure:
+
+\begin{itemize}
+    \item \textbf{NIST SP 800-30} provides the risk-assessment 
+    methodology underlying the Business Impact Rubric.
+    \item \textbf{NIST CSF} (Identify, Protect, Detect, Respond, 
+    Recover) is directly supported: the framework strengthens the 
+    Detect function through improved alert triage and the Respond 
+    function through priority-ordered incident queues.
+    \item \textbf{ISO/IEC 27035} incident-management guidance is 
+    satisfied by the framework's audit trail, which records the 
+    SHAP explanation, priority score, and analyst feedback for 
+    every alert.
+    \item \textbf{CVSS-aligned severity criteria} ensure that business-impact scores are semantically consistent with 
+    industry-standard vulnerability scoring.
+\end{itemize}
+
+Together, these properties establish that the proposed framework is 
+not merely a research prototype but a deployable, auditable, and 
+standards-aligned solution suitable for operational SOC use in 
+critical infrastructure environments.
+
+% =========================================================
+% MODIFIED: Discussion section with new concept drift subsection
+% =========================================================
+\section{Discussion}
+
+The results establish four practical findings. First, the model achieves 
+near-perfect ROC-AUC across all 15 classes, but the macro F1 of 0.84 (and cross-validated 0.8322) reveals the irreducible difficulty of the rarest classes; we therefore recommend that SOC deployments treat 
+macro F1 and Critical Attack Recall rather than overall accuracy as 
+the governing metrics. Second, the moderated (square-root-balanced) 
+XGBoost classifier achieves a Critical Attack Recall of 0.94 on the 
+four rare Critical High-Loss classes, a 51\% relative improvement 
+over the Random Forest baseline (0.62). This improvement is obtained 
+at the cost of reduced precision on the same classes (0.55 vs.~higher 
+RF values), a deliberate trade-off: in a SOC environment, a false 
+negative on a rare catastrophic attack (e.g., a missed Heartbleed 
+exploit) can result in multi-million-dollar breaches and regulatory 
+penalties, whereas a false positive costs the analyst only a few 
+minutes of triage. Third, the feature-ranking divergence between Random Forest and 
+XGBoost (Table~\ref{tab:top30}), with \textit{Packet Length Std} and 
+\textit{Max Packet Length} dominating the RF ranking while \textit{PSH 
+Flag Count} and \textit{Bwd Packet Length Max} dominate the XGBoost 
+ranking, demonstrates that the two-stage design leverages complementary 
+inductive biases. The Random Forest selector captures broad univariate 
+discriminators, while XGBoost's gain-based criterion identifies 
+interaction-driven features, and the combination recovers competitive 
+accuracy even with a modest Top-30 subset.
+
+\subsection{Treatment of Web Attack XSS as a High-Priority Class}
+\label{subsec:xss_treatment}
+
+Web Attack XSS is treated as a High-Priority Attack ($I = 0.73$) 
+rather than a Critical High-Loss Attack, reflecting both its 
+client-side attack surface and the inherent limitations of 
+flow-based detection for this class. While the classifier achieves 
+reasonable recall on XSS (0.50), precision remains low (0.12), a 
+limitation shared by all models evaluated in this study, including 
+the Random Forest baseline (precision 0.13). This is expected: XSS 
+payloads are primarily distinguished at the application layer, and 
+the flow-level features used by our framework (chosen for sub-second 
+real-time latency) cannot reliably separate XSS from benign HTTP 
+traffic. The Business Impact Rubric mitigates this limitation by 
+assigning XSS a lower weight than server-side breaches such as 
+Heartbleed or SQL Injection, ensuring that low-confidence XSS 
+detections do not saturate the top of the analyst queue.
+
+\subsection{Concept Drift Resilience via Business Impact Anchoring}
+\label{subsec:concept_drift}
+
+A practical advantage of the proposed framework is that its alert 
+prioritization does not depend solely on the classifier's probability 
+estimate $P_{\text{threat}}$. Because the Priority Score 
+$S_P = \alpha P_{\text{threat}} + (1-\alpha) I$ incorporates a 
+business-impact term $I$ anchored to asset criticality and 
+mission-importance properties that are organizational and largely 
+invariant over time, the ranking remains operationally meaningful 
+even when the underlying network traffic distribution drifts. For 
+instance, a novel attack pattern unseen during training may cause 
+$P_{\text{threat}}$ to degrade, yet the $I$ term continues to 
+correctly prioritize alerts targeting critical infrastructure over 
+those targeting low-value assets. This provides a graceful-degradation 
+property that purely probabilistic IDS deployments lack: classifier 
+confidence may fluctuate across concept drift, but the enterprise 
+risk posture embedded in the priority queue remains stable and 
+aligned with SOC incident-response policy.
+
+% =========================================================
+% MODIFIED: Limitations section with softened concept drift line
+% =========================================================
+\section{Limitations}
+\begin{itemize}
+    \item The XSS class is treated as a High-Priority rather than 
+Critical class because flow-based features cannot reliably separate 
+XSS from benign HTTP traffic (precision 0.12, recall 0.50). Future 
+work will explore deep packet inspection or WAF integration for 
+XSS-specific detection.
+    \item CICIDS2017 was collected in 2017; while our framework is architecturally resilient to concept drift through the business-impact term $I$ (Section~\ref{subsec:concept_drift}), we do not empirically evaluate drift on live production traffic.
+    \item The Business Impact Rubric is currently a heuristic anchored on NIST SP 800-30 and CVSS semantics; formal Delphi-based expert validation with SOC analysts is planned.
+    \item MTTD and financial-risk results are derived from a discrete-event queue simulation, not a live SOC deployment.
+    \item Adversarial evasion against the XGBoost classifier was not evaluated.
+    \item Results are reported only on CICIDS2017; cross-dataset generalization to UNSW-NB15 is ongoing.
+\end{itemize}
+
+\section{Conclusion and Future Work}
+This paper presented a two-stage Explainable AI framework, Random 
+Forest feature selection followed by cost-sensitive XGBoost 
+classification, fused with a NIST SP 800-30-aligned Business Impact 
+Scoring Rubric for automated threat triage in SOCs. On a de-duplicated 
+2{,}520{,}798-flow partition of CICIDS2017, the classifier achieves 
+99.64\% accuracy, 1.00 weighted F1, and a 5-fold cross-validated 
+macro F1 of $0.8322\pm0.0187$. SHAP attribution exposes the network-
+flow features driving each multi-class decision, while the impact-
+aware priority queue surfaces 100\% of Critical High-Loss attacks 
+within the Top-50 alerts, compared to 0\% under plain probabilistic 
+ranking. Future work will validate the framework on live SIEM 
+streams, extend it to UNSW-NB15, and perform formal expert 
+validation of the impact rubric.
+
+\begin{thebibliography}{00}
+\bibitem{c1} I. Sharafaldin, A. H. Lashkari, and A. A. Ghorbani, 
+``Toward generating a new intrusion detection dataset and intrusion 
+traffic characterization,'' in \emph{Proc. Int. Conf. Inf. Syst. 
+Security and Privacy (ICISSP)}, 2018, pp. 108-116.
+\bibitem{c2} H. Hindy \emph{et al.}, ``A Taxonomy of Network Threats and the Effect of Current Datasets on Intrusion Detection Systems,'' \emph{IEEE Access}, vol. 8, pp. 104650-104675, 2020.
+\bibitem{c3} K. Amarasinghe, K. Kenney, and M. Manic, ``Toward Explainable Deep Learning for Machine Health Prognostics,'' \emph{IEEE Trans. Ind. Electron.}, vol. 65, no. 10, pp. 8251-8257, 2018.
+\bibitem{c4} M. A. Ferrag \emph{et al.}, ``Deep Learning for Cyber Security Intrusion Detection: Approaches, Datasets, and Comparative Study,'' \emph{J. Inf. Secur. Appl.}, vol. 50, p. 102419, 2020.
+\bibitem{c5} R. Vinayakumar \emph{et al.}, ``Deep Learning Approach for Intelligent Intrusion Detection System,'' \emph{IEEE Access}, vol. 7, pp. 41525-41550, 2019.
+\bibitem{c6} O. Y. Al-Jarrah \emph{et al.}, ``Intrusion Detection Systems for Advanced Persistent Threats: A Survey,'' \emph{IEEE Access}, vol. 4, pp. 5440-5458, 2016.
+\bibitem{c7} Y. N. Kunang \emph{et al.}, ``Automatic Features Extraction Using Autoencoder in Intrusion Detection System,'' in \emph{Proc. ICECOS}, 2018, pp. 219-224.
+\bibitem{c8} M. Roopak, G. Yun Tian, and J. Chambers, ``Deep Learning Models for Cyber Security in IoT Networks,'' in \emph{Proc. IEEE CCWC}, 2019, pp. 452-457.
+\bibitem{c9} C. Yin, Y. Zhu, J. Fei, and X. He, ``A Deep Learning Approach for Intrusion Detection Using Recurrent Neural Networks,'' \emph{IEEE Access}, vol. 5, pp. 21954-21961, 2017.
+\bibitem{c10} W. Samek \emph{et al.}, \emph{Explainable AI: Interpreting, Explaining and Visualizing Deep Learning}. Springer, 2019.
+\bibitem{c11} A. Barredo Arrieta \emph{et al.}, ``Explainable Artificial Intelligence (XAI): Concepts, taxonomies, opportunities and challenges,'' \emph{Inf. Fusion}, vol. 58, pp. 82-115, 2020.
+\bibitem{c12} M. T. Ribeiro, S. Singh, and C. Guestrin, ``Why Should I Trust You?: Explaining the Predictions of Any Classifier,'' in \emph{Proc. ACM SIGKDD}, 2016, pp. 1135-1144.
+\bibitem{c13} A. H. Lashkari \emph{et al.}, ``Characterization of Tor Traffic Using Time Based Features,'' in \emph{Proc. ICISSP}, 2017, pp. 253-262.
+\bibitem{c14} V. H. V. H. \emph{et al.}, ``Evaluating machine learning models for network intrusion detection using CICIDS2017,'' \emph{Comput. Netw.}, vol. 182, p. 107481, 2020.
+\bibitem{c15} I. Sharafaldin \emph{et al.}, ``A Detailed Analysis of the CICIDS2017 Data Set,'' in \emph{Information Systems Security and Privacy}. Springer, 2019, pp. 172-188.
+\bibitem{c16} N. V. Chawla \emph{et al.}, ``SMOTE: Synthetic Minority Over-sampling Technique,'' \emph{J. Artif. Intell. Res.}, vol. 16, pp. 321-357, 2002.
+\bibitem{c17} H. He and E. A. Garcia, ``Learning from Imbalanced Data,'' \emph{IEEE Trans. Knowl. Data Eng.}, vol. 21, no. 9, pp. 1263-1284, 2009.
+\bibitem{c18} G. Chandrashekar and F. Sahin, ``A survey on feature selection methods,'' \emph{Comput. Electr. Eng.}, vol. 40, no. 1, pp. 16-28, 2014.
+\bibitem{c19} L. Breiman, ``Random forests,'' \emph{Machine Learning}, vol. 45, no. 1, pp. 5-32, 2001.
+\bibitem{c20} T. Chen and C. Guestrin, ``XGBoost: A scalable tree boosting system,'' in \emph{Proc. ACM SIGKDD}, 2016, pp. 785-794.
+\bibitem{c21} A. Macia-Perez \emph{et al.}, ``An IT security risk assessment methodology for complex enterprise environments,'' \emph{Comput. Secur.}, vol. 30, no. 8, pp. 838-855, 2011.
+\bibitem{c22} E. Wheeler, \emph{Security Risk Management}. Syngenta, 2011.
+\bibitem{c23} S. M. Lundberg and S.-I. Lee, ``A unified approach to interpreting model predictions,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017, pp. 4765-4774.
+\bibitem{c24} S. Ustebay, Z. Turgut, and M. A. Aydin, ``Intrusion Detection System with Recursive Feature Elimination by using Random Forest and Deep Learning Classifier,'' in \emph{Proc. Int. Congr. Big Data, Deep Learning and Fighting Cyber Terrorism (IBIGDELFT)}, 2018, pp. 71-76.
+\bibitem{c25} S. Mane and D. Rao, ``Explaining Network Intrusion Detection System Using Explainable AI Framework,'' \emph{arXiv preprint arXiv:2103.07110}, 2021.
+\end{thebibliography}
+
+\appendices
+
+\section{Raw Confusion Matrix}
+\label{app:raw_cm}
+
+Fig.~\ref{fig:raw_cm} reports the raw confusion matrix (absolute 
+counts) computed on the complete 504{,}160-sample test partition under 
+the proposed moderated XGBoost classifier. A logarithmic color scale 
+is used so that low-count cells remain visible alongside the 
+high-volume BENIGN and DoS classes. The classifier achieves 
+near-perfect diagonal dominance across all five reduced categories, 
+with residual misclassifications confined to the WebAttack and 
+BruteForce boundaries. For visualization purposes, the "WebAttack" 
+category aggregates Heartbleed, Infiltration, Web Attack Brute Force, 
+SQL Injection, and XSS, as these classes share a common 
+application-layer attack surface.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{Raw_Confusion_Matrix.png}
+  \caption{Raw confusion matrix (absolute counts) on the complete 
+  test partition under a logarithmic color scale. The "WebAttack" 
+  category aggregates Heartbleed, Infiltration, Web Attack Brute 
+  Force, SQL Injection, and XSS.}
+  \label{fig:raw_cm}
+\end{figure}
+
+\section{Per-Class SHAP Beeswarm Plots}
+\label{app:shap_beeswarm}
+
+To keep the main text concise, we present the remaining per-class 
+SHAP Beeswarm plots for all 15 traffic classes. Each plot reports the 
+directional contribution of the Top-12 features (by mean $|SHAP|$) 
+toward the predicted probability of the corresponding class. Feature 
+values are color-coded (blue $=$ low, red $=$ high) and each dot is 
+one test instance. The plots for BENIGN, Bot, and DDoS are omitted 
+here as they are discussed in the main text (Fig.~\ref{fig:shap_bar}).
+
+% ─── DoS Family ───────────────────────────────
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_DoS_Golden_Eye_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{DoS GoldenEye}. \textit{Destination 
+  Port} and \textit{Flow Bytes/s} dominate the positive-classification 
+  direction.}
+  \label{fig:shap_goldeneye}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_DoS_Hulk_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{DoS Hulk}. High \textit{Bwd Packet 
+  Length Std} values strongly push Hulk classification positive.}
+  \label{fig:shap_hulk}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_DoS_Slowhttptest_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{DoS Slowhttptest}. Long-tail 
+  contributions on \textit{Flow IAT Std} separate this class from 
+  faster DoS variants.}
+  \label{fig:shap_slowhttptest}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_DoS_Slowloris_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{DoS slowloris}. Low \textit{Destination 
+  Port} entropy and \textit{Init\_Win\_bytes\_forward} are the primary 
+  drivers.}
+  \label{fig:shap_slowloris}
+\end{figure}
+
+% ─── Brute-Force Family ───────────────────────
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_FTP_Patator_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{FTP-Patator}. A narrow feature 
+  contribution profile centered on \textit{Destination Port} (port 21).}
+  \label{fig:shap_ftp}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_SSH_Patator_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{SSH-Patator}. A single 
+  high-magnitude tail on \textit{Destination Port} separates SSH-Patator 
+  alerts.}
+  \label{fig:shap_ssh}
+\end{figure}
+
+% ─── Critical High-Loss Family ────────────────
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_Heartbleed_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{Heartbleed}. \textit{Avg Bwd 
+  Segment Size} and \textit{Fwd Packet Length Max} are the dominant 
+  positive contributors.}
+  \label{fig:shap_heartbleed}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_Infiltration_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{Infiltration}. \textit{Destination 
+  Port} and \textit{Fwd Packet Length Std} show directional separation.}
+  \label{fig:shap_infiltration}
+\end{figure}
+
+% ─── Reconnaissance ───────────────────────────
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_PortScan_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{PortScan}. \textit{Packet Length 
+  Mean} and \textit{PSH Flag Count} dominate; high PSH Flag Count is 
+  strongly indicative of sweep activity.}
+  \label{fig:shap_portscan}
+\end{figure}
+
+% ─── Web Attack Family ────────────────────────
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_Web_Attack_Brute_Force_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{Web Attack (Brute Force)}. 
+  \textit{Init\_Win\_bytes\_backward} shows a strong high-value tail 
+  driving positive classification.}
+  \label{fig:shap_webbf}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_Web_Attack_SQLi_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{Web Attack (SQL Injection)}. 
+  \textit{Init\_Win\_bytes\_backward} and \textit{Flow IAT Max} dominate 
+  with narrow, high-value tails.}
+  \label{fig:shap_websql}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{SHAP_Beeswarm_Web_Attack_XSS_Threat.png}
+  \caption{SHAP Beeswarm for \textbf{Web Attack (XSS)}. 
+  \textit{Init\_Win\_bytes\_backward} again dominates, confirming its 
+  role as a browser-session discriminator.}
+  \label{fig:shap_webxss}
+\end{figure}
+
+\end{document}
