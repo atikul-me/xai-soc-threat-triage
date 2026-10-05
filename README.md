@@ -35,7 +35,7 @@ SHAP values are integrated to make the model interpretable for SOC analysts, and
 | Metric | Value |
 |---|---|
 | Overall Accuracy | **99.64%** |
-| Weighted F1 | **1.00** |
+| Weighted F1 | **0.9972** |
 | Macro F1 (5-fold CV) | **0.8322 ± 0.0187** |
 | Critical Attack Recall (4 rare classes) | **0.94** |
 | Top-50 Critical Attack Surface Rate | **100%** |
